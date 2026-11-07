@@ -1,0 +1,67 @@
+name: Fix License Headers
+
+on:
+  # Not `pull_request_target`: that gives a write token to a job that checks
+  # out the pull request's own code. The one step that needs the token (the
+  # push below) only ever runs for a branch in this repository, which a
+  # `pull_request` run can still do.
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  header-license-fix:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write      # to push the header fix back to the branch
+      pull-requests: read  # for `gh pr checkout`
+
+    steps:
+      - name: Checkout
+        # zizmor: ignore[artipacked] - the credentials are what the push uses
+        uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Checkout the branch from the PR that triggered the job
+        run: gh pr checkout ${{ github.event.pull_request.number }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fix License Header
+        # pin to include https://github.com/apache/skywalking-eyes/pull/168
+        uses: apache/skywalking-eyes/header@a196742f472feaffafea537ce5a2a4c3c53a8de4
+        with:
+          mode: fix
+
+      - name: List files changed
+        id: files-changed
+        shell: bash -l {0}
+        run: |
+          set -ex
+          export CHANGES=$(git status --porcelain | tee /tmp/modified.log | wc -l)
+          cat /tmp/modified.log
+
+          echo "N_CHANGES=${CHANGES}" >> $GITHUB_OUTPUT
+
+          git diff
+
+      - name: Commit any changes
+        if: steps.files-changed.outputs.N_CHANGES != '0' && github.event.pull_request.head.repo.full_name == github.repository
+        shell: bash -l {0}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git pull --no-tags
+
+          git add *
+          git commit -m "Automatic application of license header"
+
+          git push origin "HEAD:refs/heads/$HEAD_REF"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}

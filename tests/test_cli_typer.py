@@ -1,0 +1,151 @@
+# Copyright (c) 2024- Datalayer, Inc.
+#
+# BSD 3-Clause License
+
+"""Regression tests for the Typer-based CLI implementation."""
+
+from unittest.mock import patch
+
+from typer.testing import CliRunner
+
+from jupyter_mcp_server.cli.cli import DocumentProvider, app, connect_command, stop_command
+from jupyter_mcp_server.identity import TOKEN_VERIFIER_CLASS_ENV
+
+
+class _Response:
+    def raise_for_status(self):
+        return None
+
+
+def test_typer_connect_command_sends_mcp_token():
+    """The Typer CLI connect command forwards MCP auth to management routes."""
+    from jupyter_mcp_server.config import reset_config
+
+    reset_config()
+    seen = {}
+
+    def fake_put(url, headers=None, content=None):
+        seen["url"] = url
+        seen["headers"] = headers
+        seen["content"] = content
+        return _Response()
+
+    with patch("jupyter_mcp_server.cli.commands.connect.httpx.put", fake_put):
+        connect_command(
+            jupyter_mcp_server_url="http://localhost:4040",
+            document_provider=DocumentProvider.jupyter,
+            jupyterlab=True,
+            open_notebook_in_ui=False,
+            code_sandbox_url=None,
+            code_sandbox_id="kernel-id",
+            code_sandbox_token=None,
+            mcp_token="client-token",
+            document_url=None,
+            document_id="notebook.ipynb",
+            document_token=None,
+            jupyter_url="http://localhost:8888",
+            jupyter_token="jupyter-token",
+        )
+    assert seen["headers"]["Authorization"] == "Bearer client-token"
+
+
+def test_typer_stop_command_sends_mcp_token():
+    """The Typer CLI stop command forwards MCP auth to management routes."""
+    seen = {}
+
+    def fake_delete(url, headers=None):
+        seen["url"] = url
+        seen["headers"] = headers
+        return _Response()
+
+    with patch("jupyter_mcp_server.cli.commands.stop.httpx.delete", fake_delete):
+        stop_command(
+            jupyter_mcp_server_url="http://localhost:4040",
+            mcp_token="client-token",
+        )
+
+    assert seen["headers"]["Authorization"] == "Bearer client-token"
+
+
+def test_typer_start_streamable_http_requires_auth_token():
+    """Typer start refuses streamable-http without MCP auth by default."""
+    result = CliRunner().invoke(
+        app,
+        [
+            "start",
+            "--transport",
+            "streamable-http",
+        ],
+    )
+
+    assert result.exit_code != 0
+    message = result.output or str(result.exception or "")
+    assert "requires MCP client authentication" in message
+
+
+def test_typer_start_streamable_http_error_names_the_verifier_option(monkeypatch):
+    """The refusal must mention every way of satisfying it, not only the token."""
+    monkeypatch.delenv(TOKEN_VERIFIER_CLASS_ENV, raising=False)
+
+    result = CliRunner().invoke(app, ["start", "--transport", "streamable-http"])
+
+    assert result.exit_code != 0
+    message = result.output or str(result.exception or "")
+    assert TOKEN_VERIFIER_CLASS_ENV in message
+
+
+def test_typer_start_streamable_http_accepts_a_configured_verifier(monkeypatch):
+    """A deployment authenticating its own way needs no --mcp-token.
+
+    This is the path a platform takes: its verifier is named in the
+    environment, so the shared secret is neither present nor wanted.
+    """
+    monkeypatch.setenv(TOKEN_VERIFIER_CLASS_ENV, "tests.test_identity:AcceptingVerifier")
+    seen = {}
+
+    def fake_do_start(**kwargs):
+        seen.update(kwargs)
+
+    with patch("jupyter_mcp_server.cli.commands.serve.do_start", fake_do_start):
+        result = CliRunner().invoke(app, ["start", "--transport", "streamable-http"])
+
+    assert result.exit_code == 0, result.output
+    assert seen["transport"] == "streamable-http"
+    assert not seen.get("mcp_token")
+
+
+def test_typer_start_stdio_needs_no_mcp_auth(monkeypatch):
+    """stdio does not speak HTTP, so none of this applies to it."""
+    monkeypatch.delenv(TOKEN_VERIFIER_CLASS_ENV, raising=False)
+    seen = {}
+
+    def fake_do_start(**kwargs):
+        seen.update(kwargs)
+
+    with patch("jupyter_mcp_server.cli.commands.serve.do_start", fake_do_start):
+        result = CliRunner().invoke(app, ["start", "--transport", "stdio"])
+
+    assert result.exit_code == 0, result.output
+    assert seen["transport"] == "stdio"
+
+
+def test_typer_root_accepts_explicit_start_new_code_sandbox_bool_value():
+    """Root callback accepts an explicit '--start-new-code-sandbox False' value."""
+    seen = {}
+
+    def fake_do_start(**kwargs):
+        seen.update(kwargs)
+
+    with patch("jupyter_mcp_server.cli.commands.serve.do_start", fake_do_start):
+        result = CliRunner().invoke(
+            app,
+            [
+                "--transport",
+                "stdio",
+                "--start-new-code-sandbox",
+                "False",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert seen["start_new_code_sandbox"] is False
